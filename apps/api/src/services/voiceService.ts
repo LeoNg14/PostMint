@@ -48,7 +48,10 @@ export const generateVoiceover = async (
     throw new Error(`ElevenLabs API error: ${err}`);
   }
 
-  const data = await response.json();
+  const data = await response.json() as {
+    audio_base64: string;
+    alignment?: { words?: Array<{ word: string; start: number; end: number }> };
+  };
 
   // Decode base64 audio
   const audioBuffer = Buffer.from(data.audio_base64, 'base64');

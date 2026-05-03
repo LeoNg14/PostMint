@@ -10,8 +10,11 @@ import * as path from 'path';
 import * as os from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import ffmpegPath from 'ffmpeg-static';
 
 const execAsync = promisify(exec);
+const ffmpeg = (args: string, opts?: { timeout?: number }) =>
+  execAsync(`"${ffmpegPath}" ${args}`, opts);
 
 const updateJobStatus = async (
   jobId: string,
@@ -71,8 +74,8 @@ const processVideoJob = async (job: Job<VideoJobData>): Promise<VideoJobResult> 
     } catch (renderErr) {
       console.warn('Remotion render failed, using placeholder:', renderErr);
       // Create a simple placeholder video using FFmpeg if Remotion fails
-      await execAsync(
-        `ffmpeg -f lavfi -i color=c=black:s=1080x1920:d=${Math.ceil(voice.duration)} -c:v libx264 "${videoPath}" -y`,
+      await ffmpeg(
+        `-f lavfi -i color=c=black:s=1080x1920:d=${Math.ceil(voice.duration)} -c:v libx264 "${videoPath}" -y`,
         { timeout: 30000 }
       ).catch(() => {
         // If ffmpeg also not available, just use audio
@@ -85,8 +88,8 @@ const processVideoJob = async (job: Job<VideoJobData>): Promise<VideoJobResult> 
     // Step 4: Stitch audio + video with FFmpeg
     const finalPath = path.join(os.tmpdir(), `postmint-final-${jobId}.mp4`);
     try {
-      await execAsync(
-        `ffmpeg -i "${videoPath}" -i "${voice.audioPath}" -c:v copy -c:a aac -shortest "${finalPath}" -y`,
+      await ffmpeg(
+        `-i "${videoPath}" -i "${voice.audioPath}" -c:v copy -c:a aac -shortest "${finalPath}" -y`,
         { timeout: 60000 }
       );
     } catch {

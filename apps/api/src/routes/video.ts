@@ -4,7 +4,6 @@ import { generateRateLimiter } from '../middleware/rateLimiter';
 import { sendSuccess, sendError } from '../utils/response';
 import { videoQueue } from '../config/queue';
 import { supabaseAdmin } from '../config/supabase';
-import { VideoStyle, ELEVENLABS_VOICES } from '../types/video';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -44,7 +43,8 @@ router.post('/', requireAuth, generateRateLimiter, async (req: AuthRequest, res:
   });
 
   if (error) {
-    sendError(res, 'Failed to create job', 'DB_ERROR', 500);
+    console.error('video_jobs insert error:', { message: error.message, code: error.code, details: error.details });
+    sendError(res, `Failed to create job: ${error.message}`, 'DB_ERROR', 500);
     return;
   }
 

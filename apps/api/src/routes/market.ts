@@ -7,7 +7,7 @@ const router = Router();
 router.get('/:ticker', requireAuth, async (req: Request, res: Response) => {
   const { ticker } = req.params;
   // TODO: MarketService + Redis cache next session
-  sendSuccess(res, { ticker: ticker.toUpperCase(), message: 'Market service coming next' });
+  sendSuccess(res, { ticker: (ticker as string).toUpperCase(), message: 'Market service coming next' });
 });
 
 export default router;

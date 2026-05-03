@@ -22,7 +22,7 @@ export const getMarketSnapshot = async (ticker: string): Promise<MarketSnapshot 
   try {
     const url = `https://api.polygon.io/v2/aggs/ticker/${ticker.toUpperCase()}/prev?adjusted=true&apiKey=${env.POLYGON_API_KEY}`;
     const res = await fetch(url);
-    const data = await res.json();
+    const data = await res.json() as { status: string; results?: Array<{ c: number; o: number; v: number }> };
 
     if (data.status !== 'OK' || !data.results?.length) {
       return null;

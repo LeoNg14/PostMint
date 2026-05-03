@@ -1,4 +1,5 @@
-import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring } from 'remotion';
+import React from 'react';
+import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate } from 'remotion';
 
 interface KeyStat {
   label: string;
@@ -6,7 +7,7 @@ interface KeyStat {
   highlight: boolean;
 }
 
-interface Props {
+interface Props extends Record<string, unknown> {
   script: {
     hook: string;
     body: string;
@@ -33,7 +34,7 @@ const STYLE_COLORS: Record<string, { bg: string; accent: string; text: string }>
 
 export const FinanceVideo: React.FC<Props> = ({ script, ticker, marketData, style }) => {
   const frame = useCurrentFrame();
-  const { fps, durationInFrames } = useVideoConfig();
+  const { fps } = useVideoConfig();
   const colors = STYLE_COLORS[style] ?? STYLE_COLORS.analysis;
 
   const titleOpacity = interpolate(frame, [0, 15], [0, 1], { extrapolateRight: 'clamp' });
