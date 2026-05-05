@@ -13,8 +13,6 @@ import { promisify } from 'util';
 import ffmpegPath from 'ffmpeg-static';
 
 const execAsync = promisify(exec);
-const ffmpeg = (args: string, opts?: { timeout?: number }) =>
-  execAsync(`"${ffmpegPath}" ${args}`, opts);
 
 const updateJobStatus = async (
   jobId: string,
@@ -33,6 +31,8 @@ const processVideoJob = async (job: Job<VideoJobData>): Promise<VideoJobResult> 
 
   console.log(`Processing video job ${jobId} for user ${userId}`);
 
+  const tempFiles: string[] = [];
+
   try {
     // Step 1: Generate script
     await updateJobStatus(jobId, 'scripting', 10);
@@ -43,14 +43,18 @@ const processVideoJob = async (job: Job<VideoJobData>): Promise<VideoJobResult> 
     // Step 2: Generate voiceover
     await updateJobStatus(jobId, 'voicing', 30);
     const voice = await generateVoiceover(script.fullScript, voiceId);
+    tempFiles.push(voice.audioPath);
     await updateJobStatus(jobId, 'voicing', 50);
 
-    // Step 3: Render video frames via Remotion
+    // Step 3: Render video via Remotion (audio embedded directly in the composition)
     await updateJobStatus(jobId, 'rendering', 55);
-    const framesDir = path.join(os.tmpdir(), `postmint-frames-${jobId}`);
-    fs.mkdirSync(framesDir, { recursive: true });
 
-    // Write render data for Remotion
+    // Base64-encode the audio so Remotion can embed it via <Audio src="data:…" />
+    // This is the most reliable way to get audio into the final video without
+    // needing a separate FFmpeg stitch step that can fail on Windows paths.
+    const audioBuffer = fs.readFileSync(voice.audioPath);
+    const audioSrc = `data:audio/mpeg;base64,${audioBuffer.toString('base64')}`;
+
     const renderData = {
       script,
       ticker,
@@ -58,52 +62,65 @@ const processVideoJob = async (job: Job<VideoJobData>): Promise<VideoJobResult> 
       style,
       duration: voice.duration,
       wordTimings: voice.wordTimings,
+      audioSrc, // embedded in the Remotion <Audio> component
     };
+
     const renderDataPath = path.join(os.tmpdir(), `postmint-renderdata-${jobId}.json`);
     fs.writeFileSync(renderDataPath, JSON.stringify(renderData));
+    tempFiles.push(renderDataPath);
 
-    // Call Remotion CLI to render
     const videoPath = path.join(os.tmpdir(), `postmint-video-${jobId}.mp4`);
-    const remotionCmd = `npx remotion render --props="${renderDataPath}" --output="${videoPath}" --composition=FinanceVideo`;
+    tempFiles.push(videoPath);
+
+    // Remotion v4 CLI: <entry-file> <composition-id> [options]
+    // The renderer package must be in apps/renderer relative to the API working dir.
+    const rendererDir = path.join(process.cwd(), '..', 'renderer');
+    const remotionCmd = [
+      'npx remotion render',
+      'src/index.ts',
+      'FinanceVideo',
+      `--props="${renderDataPath}"`,
+      `--output="${videoPath}"`,
+      '--log=verbose',
+    ].join(' ');
+
+    console.log(`Running Remotion: ${remotionCmd}`);
 
     try {
-      await execAsync(remotionCmd, {
-        cwd: path.join(process.cwd(), '..', 'renderer'),
-        timeout: 120000,
+      const { stdout, stderr } = await execAsync(remotionCmd, {
+        cwd: rendererDir,
+        timeout: 180000, // 3 minutes
       });
-    } catch (renderErr) {
-      console.warn('Remotion render failed, using placeholder:', renderErr);
-      // Create a simple placeholder video using FFmpeg if Remotion fails
-      await ffmpeg(
-        `-f lavfi -i color=c=black:s=1080x1920:d=${Math.ceil(voice.duration)} -c:v libx264 "${videoPath}" -y`,
-        { timeout: 30000 }
-      ).catch(() => {
-        // If ffmpeg also not available, just use audio
-        fs.copyFileSync(voice.audioPath, videoPath.replace('.mp4', '.mp3'));
-      });
+      if (stderr) console.warn('Remotion stderr:', stderr.slice(-2000));
+      console.log('Remotion stdout:', stdout.slice(-1000));
+    } catch (renderErr: any) {
+      console.error('Remotion render failed:', renderErr?.message ?? renderErr);
+      // Fallback: silent black video (audio was embedded via <Audio>, so we still
+      // attempt a basic render so the upload step has something to work with)
+      if (ffmpegPath) {
+        try {
+          await execAsync(
+            `"${ffmpegPath}" -f lavfi -i color=c=black:s=1080x1920:r=30:d=${Math.ceil(voice.duration + 3)} -i "${voice.audioPath}" -c:v libx264 -c:a aac -shortest "${videoPath}" -y`,
+            { timeout: 60000 }
+          );
+          console.log('Created FFmpeg fallback video with audio');
+        } catch (ffmpegErr) {
+          console.error('FFmpeg fallback also failed:', ffmpegErr);
+          throw renderErr; // re-throw the original Remotion error
+        }
+      } else {
+        throw renderErr;
+      }
     }
 
-    await updateJobStatus(jobId, 'stitching', 75);
+    await updateJobStatus(jobId, 'stitching', 80);
 
-    // Step 4: Stitch audio + video with FFmpeg
-    const finalPath = path.join(os.tmpdir(), `postmint-final-${jobId}.mp4`);
-    try {
-      await ffmpeg(
-        `-i "${videoPath}" -i "${voice.audioPath}" -c:v copy -c:a aac -shortest "${finalPath}" -y`,
-        { timeout: 60000 }
-      );
-    } catch {
-      // If ffmpeg stitch fails, use video as-is
-      fs.copyFileSync(videoPath, finalPath);
+    // Step 4: Upload to Supabase Storage
+    if (!fs.existsSync(videoPath)) {
+      throw new Error('Video file not found after render');
     }
 
-    await updateJobStatus(jobId, 'stitching', 85);
-
-    // Step 5: Upload to Supabase Storage
-    const videoBuffer = fs.existsSync(finalPath)
-      ? fs.readFileSync(finalPath)
-      : fs.readFileSync(videoPath);
-
+    const videoBuffer = fs.readFileSync(videoPath);
     const storagePath = `videos/${userId}/${jobId}.mp4`;
     const { error: uploadError } = await supabaseAdmin.storage
       .from('postmint-videos')
@@ -118,10 +135,10 @@ const processVideoJob = async (job: Job<VideoJobData>): Promise<VideoJobResult> 
       .from('postmint-videos')
       .getPublicUrl(storagePath);
 
-    // Cleanup temp files
-    [videoPath, finalPath, voice.audioPath, renderDataPath].forEach(f => {
+    // Cleanup
+    for (const f of tempFiles) {
       try { fs.unlinkSync(f); } catch {}
-    });
+    }
 
     await updateJobStatus(jobId, 'done', 100, {
       video_url: publicUrl,
@@ -137,6 +154,10 @@ const processVideoJob = async (job: Job<VideoJobData>): Promise<VideoJobResult> 
 
   } catch (err: any) {
     console.error(`Video job ${jobId} failed:`, err);
+    // Attempt cleanup even on failure
+    for (const f of tempFiles) {
+      try { fs.unlinkSync(f); } catch {}
+    }
     await updateJobStatus(jobId, 'failed', 0, {
       error_message: err.message ?? 'Unknown error',
     });
@@ -150,7 +171,7 @@ export const startVideoWorker = () => {
     processVideoJob,
     {
       connection: queueConnection,
-      concurrency: 2, // max 2 videos rendering at once
+      concurrency: 2,
     }
   );
 
